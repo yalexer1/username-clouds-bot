@@ -57,15 +57,8 @@ class UsernameChecker:
         return "error"
 
     async def check(self, username: str) -> str:
+        # Временно отключаем Fragment, чтобы быстрее наполнить базу
         is_free = await self.check_mtproto(username)
-        if not is_free:
-            return "taken"
-        fragment_status = await self.check_fragment(username)
-        if fragment_status == "auction":
-            return "auction"
-        elif fragment_status == "free":
-            return "free"
-        else:
-            return "error"
+        return "free" if is_free else "taken"
 
 checker = UsernameChecker()

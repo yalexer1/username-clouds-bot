@@ -8,11 +8,10 @@ class Settings(BaseSettings):
     API_HASH: str
     SESSION_STRING: str = ""
     ADMIN_IDS: str = ""
-    # DATABASE_URL теперь не нужен
     FRAGMENT_BASE_URL: str = "https://fragment.com/username"
     WORKER_SLEEP: int = 5
     MT_PROTO_DELAY: float = 0.5
-    BEAUTY_SCORE_THRESHOLD: int = 70
+    BEAUTY_SCORE_THRESHOLD: int = 20   # снизил с 70 до 20
     LIMIT_PER_REQUEST: int = 10
 
     @property
