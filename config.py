@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     API_HASH: str
     SESSION_STRING: str = ""
     ADMIN_IDS: str = ""
-    DATABASE_URL: str = "sqlite+aiosqlite:///usernames.db"
+    # DATABASE_URL теперь не нужен
     FRAGMENT_BASE_URL: str = "https://fragment.com/username"
     WORKER_SLEEP: int = 5
     MT_PROTO_DELAY: float = 0.5
