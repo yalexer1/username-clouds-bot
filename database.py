@@ -4,12 +4,6 @@ from typing import List, Dict, Any
 from config import settings
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-print("=== DATABASE_URL DEBUG ===")
-print(f"Value: {DATABASE_URL}")
-if not DATABASE_URL:
-    print("ERROR: DATABASE_URL is not set!")
-    raise RuntimeError("DATABASE_URL environment variable is missing")
-print("==========================")
 
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
@@ -35,8 +29,7 @@ async def insert_username(username: str, length: int, beauty_score: int, status:
         )
         await conn.close()
         return True
-    except Exception as e:
-        print(f"Insert error: {e}")
+    except:
         return False
 
 async def get_free_usernames(length: int, limit: int, offset: int) -> List[Dict[str, Any]]:
@@ -49,7 +42,7 @@ async def get_free_usernames(length: int, limit: int, offset: int) -> List[Dict[
         length, settings.BEAUTY_SCORE_THRESHOLD, limit, offset
     )
     await conn.close()
-    return [{"id": row["id"], "username": row["username"], "beauty_score": row["beauty_score"]} for row in rows]
+    return [{"id": r["id"], "username": r["username"], "beauty_score": r["beauty_score"]} for r in rows]
 
 async def mark_as_shown(ids: List[int]) -> None:
     if not ids:
