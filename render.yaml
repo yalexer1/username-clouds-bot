@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: username-clouds-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: API_ID
+        value: 37779119
+      - key: API_HASH
+        value: 77062d4eaad215d7664fe96300df6ed2
+      - key: BOT_TOKEN
+        value: 8702904268:AAFlxqRSf6bdb91mt4yvwJuRNSyMnw185-4
+      - key: PHONE_NUMBER
+        value: +79512675083
