@@ -3,8 +3,8 @@ import os
 import random
 from typing import Dict, List, Tuple
 from enum import Enum
-from dataclasses import dataclass
-
+from threading import Thread
+from flask import Flask, request
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -18,6 +18,10 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER")
+STRING_SESSION = os.getenv("STRING_SESSION")  # Добавляем строку сессии
+
+# Flask приложение для веб-сервера
+app = Flask(__name__)
 
 # Список красивых английских слов
 POPULAR_WORDS = {
@@ -277,7 +281,7 @@ def get_find_more_keyboard() -> InlineKeyboardMarkup:
 # ========== ОСНОВНОЙ КОД БОТА ==========
 
 # Создаем клиент для бота
-app = Client(
+bot_app = Client(
     "username_bot",
     api_id=API_ID,
     api_hash=API_HASH,
@@ -285,21 +289,32 @@ app = Client(
 )
 
 # Создаем клиент для пользователя (для проверки username)
-user_client = Client(
-    "user_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    phone_number=PHONE_NUMBER
-)
+# Используем строку сессии, если она есть, иначе phone_number
+if STRING_SESSION:
+    print("✅ Используем строку сессии для авторизации")
+    user_client = Client(
+        "user_session",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=STRING_SESSION
+    )
+else:
+    print("⚠️ Строка сессии не найдена, используем номер телефона")
+    user_client = Client(
+        "user_session",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        phone_number=PHONE_NUMBER
+    )
 
-@app.on_message(filters.command("start"))
+@bot_app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
     await message.reply(
         "Добро пожаловать в Username Clouds☁, тут вы можете найти красивые username",
         reply_markup=get_main_keyboard()
     )
 
-@app.on_callback_query()
+@bot_app.on_callback_query()
 async def handle_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
@@ -401,22 +416,30 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     
     await callback_query.answer()
 
-async def main():
-    print("🚀 Запуск user client для проверки username...")
-    await user_client.start()
-    print("✅ User client запущен")
+@app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "ok"}
+
+def run_bot():
+    """Запуск бота в отдельном потоке"""
+    async def start_clients():
+        await user_client.start()
+        print("✅ User client запущен")
+        await bot_app.start()
+        print("✅ Бот запущен!")
+        await asyncio.Event().wait()
     
-    print("🚀 Запуск бота...")
-    await app.start()
-    print("✅ Бот запущен! Найди его в Telegram: @UsernameCloudsBot")
-    
-    # Держим бота активным
-    await asyncio.Event().wait()
+    asyncio.run(start_clients())
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
+    # Запускаем бота в фоновом потоке
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем Flask сервер для health check
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
