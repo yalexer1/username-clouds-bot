@@ -1,204 +1,422 @@
 import asyncio
+import os
 import random
-import string
-from aiogram import Bot, Dispatcher, Router, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UsernameNotOccupiedError
-from config import settings
+from typing import Dict, List, Tuple
+from enum import Enum
+from dataclasses import dataclass
 
-# --- Инициализация бота ---
-bot = Bot(token=settings.BOT_TOKEN)
-dp = Dispatcher()
-router = Router()
-dp.include_router(router)
+from dotenv import load_dotenv
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+import aiohttp
+from bs4 import BeautifulSoup
 
-# --- Хранилище показанных username в оперативной памяти ---
-# Структура: {user_id: {length: set('shown_usernames')}}
-user_shown = {}
+load_dotenv()
 
-# --- Telethon клиент (один на весь бот) ---
-_client = None
+# ========== КОНФИГУРАЦИЯ ==========
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 
-async def get_client():
-    global _client
-    if _client is None:
-        _client = TelegramClient(StringSession(settings.SESSION_STRING), settings.API_ID, settings.API_HASH)
-        await _client.start()
-        print("Telethon client started")
-    return _client
+# Список красивых английских слов
+POPULAR_WORDS = {
+    "dream", "cloud", "star", "moon", "sun", "sky", "blue", "red", "green", "gold",
+    "rose", "love", "hope", "peace", "happy", "smart", "cool", "nice", "good", "best",
+    "king", "queen", "lord", "lady", "hero", "epic", "pro", "max", "top", "win",
+    "art", "soul", "heart", "mind", "brain", "fire", "water", "earth", "air", "wind",
+    "rain", "snow", "ice", "hot", "cold", "new", "old", "young", "fast", "slow",
+    "big", "small", "tall", "short", "long", "wide", "deep", "high", "low", "light",
+    "dark", "bright", "soft", "hard", "sweet", "sour", "bitter", "fresh", "clean",
+    "pure", "simple", "easy", "hard", "rich", "poor", "strong", "weak", "brave",
+    "calm", "wild", "free", "true", "real", "fake", "rare", "common", "unique",
+    "special", "great", "awesome", "amazing", "wonder", "magic", "myth", "legend"
+}
 
-async def is_username_free(username: str) -> bool:
-    """Проверяет, свободен ли username через MTProto API."""
-    client = await get_client()
-    try:
-        await client.get_entity(username)
+VOWELS = set('aeiou')
+CONSONANTS = set('bcdfghjklmnpqrstvwxyz')
+
+class UsernameStatus(Enum):
+    FREE = "free"
+    TAKEN = "taken"
+    AUCTION = "auction"
+
+# Кэш для сессий пользователей
+user_sessions: Dict[int, Dict] = {}
+
+# ========== ФУНКЦИИ ОЦЕНКИ КРАСОТЫ ==========
+
+def is_cvcvc_pattern(username: str) -> bool:
+    if len(username) < 5:
         return False
-    except UsernameNotOccupiedError:
-        return True
-    except FloodWaitError as e:
-        await asyncio.sleep(e.seconds)
-        return await is_username_free(username)
-    except Exception:
-        return False
+    username = username.lower()
+    for i, ch in enumerate(username[:5]):
+        if i % 2 == 0:
+            if ch not in CONSONANTS:
+                return False
+        else:
+            if ch not in VOWELS:
+                return False
+    return True
 
-def generate_pretty_usernames(length: int, count: int = 30) -> list:
-    """Генерирует красивые username (без проверки)."""
-    generated = set()
-    # Базовые красивые слова
-    bases = [
-        "star", "moon", "sun", "sky", "cloud", "dream", "heart", "flame", "glory", "magic",
-        "noble", "ocean", "peace", "queen", "rainy", "smart", "trust", "unity", "vivid", "young",
-        "zebra", "apple", "brain", "eagle", "ideal", "jolly", "karma", "light", "angel", "bliss"
-    ]
-    suffixes = ["er", "ly", "ing", "y", "ic", "al", "ous", "ive", "ful", "ish"]
-    consonants = list("bcdfghjklmnpqrstvwxyz")
-    vowels = list("aeiou")
+def has_repeating_letters(username: str) -> bool:
+    username = username.lower()
+    for i in range(len(username) - 1):
+        if username[i] == username[i + 1]:
+            return True
+    return False
 
-    # 1. Слова подходящей длины
-    candidates = [w for w in bases if len(w) == length]
-    # 2. Слова + суффиксы
-    for w in bases:
-        if len(w) <= length - 2:
-            suf = random.choice(suffixes)
-            cand = (w + suf)[:length]
-            if len(cand) == length:
-                candidates.append(cand)
-    # 3. Leet-варианты
-    for w in bases:
-        if len(w) == length:
-            leet = w.replace('a','4').replace('e','3').replace('i','1').replace('o','0').replace('s','5')
-            if leet != w:
-                candidates.append(leet)
-    # 4. CVCVC слоги
-    for _ in range(count):
-        cand = ''.join(random.choice(consonants) if i%2==0 else random.choice(vowels) for i in range(length))
-        candidates.append(cand)
-    # 5. Случайные буквы
-    for _ in range(count):
-        candidates.append(''.join(random.choices(string.ascii_lowercase, k=length)))
-    # Уникализация
-    random.shuffle(candidates)
-    for cand in candidates:
-        if cand not in generated and len(cand) == length and cand.islower() and cand.isalpha():
-            generated.add(cand)
-            if len(generated) >= count:
-                break
-    while len(generated) < count:
-        generated.add(''.join(random.choices(string.ascii_lowercase, k=length)))
-    return list(generated)
+def is_easily_readable(username: str) -> bool:
+    username = username.lower()
+    consonant_run = 0
+    for ch in username:
+        if ch in CONSONANTS:
+            consonant_run += 1
+            if consonant_run > 2:
+                return False
+        else:
+            consonant_run = 0
+    return True
 
-# --- Хэндлеры ---
-@router.message(Command("start"))
-async def cmd_start(message: types.Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔍 Искать username", callback_data="search"),
-            InlineKeyboardButton(text="👤 Кто создатель?", callback_data="creator")
-        ]
-    ])
-    await message.answer(
-        "Добро пожаловать в Username Clouds☁, тут вы можете найти username на свой вкус и цвет!",
-        reply_markup=keyboard
-    )
+def leet_to_word(username: str) -> str:
+    leet_map = {
+        '4': 'a', '3': 'e', '1': 'i', '0': 'o', '5': 's',
+        '@': 'a', '$': 's', '7': 't', '8': 'b', '9': 'g'
+    }
+    return ''.join(leet_map.get(ch, ch) for ch in username.lower())
 
-@router.callback_query(lambda c: c.data == "creator")
-async def show_creator(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
-    ])
-    await callback.message.edit_text(
-        "Мой создатель - t.me/savesep",
-        reply_markup=keyboard
-    )
-    await callback.answer()
+def is_leet_word(username: str) -> Tuple[bool, str]:
+    decoded = leet_to_word(username)
+    if decoded in POPULAR_WORDS:
+        return True, decoded
+    if decoded.isalpha() and len(decoded) >= 3:
+        return True, decoded
+    return False, ""
 
-@router.callback_query(lambda c: c.data == "back_to_start")
-async def back_to_start(callback: CallbackQuery):
-    await cmd_start(callback.message)
-    await callback.answer()
+def is_dictionary_word(username: str) -> bool:
+    return username.lower() in POPULAR_WORDS
 
-@router.callback_query(lambda c: c.data == "search")
-async def ask_length(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="5", callback_data="length_5"),
-            InlineKeyboardButton(text="6", callback_data="length_6"),
-            InlineKeyboardButton(text="7", callback_data="length_7")
-        ]
-    ])
-    await callback.message.edit_text(
-        "Выбери длину username для поиска:",
-        reply_markup=keyboard
-    )
-    await callback.answer()
+def has_no_digits(username: str) -> bool:
+    return not any(ch.isdigit() for ch in username)
 
-@router.callback_query(lambda c: c.data.startswith("length_"))
-async def start_search(callback: CallbackQuery):
-    length = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    # Инициализируем хранилище для пользователя, если его нет
-    if user_id not in user_shown:
-        user_shown[user_id] = {}
-    if length not in user_shown[user_id]:
-        user_shown[user_id][length] = set()
-    await send_usernames(callback.message, length, user_id)
-
-@router.callback_query(lambda c: c.data.startswith("next_"))
-async def more_usernames(callback: CallbackQuery):
-    _, length_str = callback.data.split("_")
-    length = int(length_str)
-    user_id = callback.from_user.id
-    await send_usernames(callback.message, length, user_id)
-
-async def send_usernames(message: types.Message, length: int, user_id: int):
-    wait_msg = await message.answer(f"🔎 Ищу красивые свободные username из {length} букв... Это может занять несколько секунд")
+def calculate_beauty_score(username: str) -> Tuple[int, List[str]]:
+    score = 0
+    reasons = []
+    username_lower = username.lower()
     
-    shown_set = user_shown[user_id][length]
+    if is_dictionary_word(username_lower):
+        score += 50
+        reasons.append("словарное слово")
+    
+    if is_cvcvc_pattern(username_lower):
+        score += 40
+        reasons.append("паттерн CVCVC")
+    
+    if has_repeating_letters(username_lower):
+        score += 20
+        reasons.append("повторяющиеся буквы")
+    
+    if is_easily_readable(username_lower):
+        score += 15
+        reasons.append("легко читаемый")
+    
+    is_leet, leet_word = is_leet_word(username)
+    if is_leet:
+        score += 30
+        reasons.append(f"leet-speak ({leet_word})")
+    
+    if has_no_digits(username):
+        score += 10
+        reasons.append("без цифр")
+    
+    score = min(score, 100)
+    return score, reasons
+
+# ========== ПРОВЕРКА ДОСТУПНОСТИ ==========
+
+async def check_mtproto_username(client: Client, username: str) -> bool:
+    try:
+        user = await client.resolve_username(username)
+        return user is None
+    except Exception as e:
+        if "USERNAME_NOT_OCCUPIED" in str(e):
+            return True
+        return False
+
+async def check_fragment_username(username: str) -> UsernameStatus:
+    url = f"https://fragment.com/username/{username}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    return UsernameStatus.FREE
+                html = await response.text()
+                text = html.lower()
+                if "place a bid" in text or "auction" in text:
+                    return UsernameStatus.AUCTION
+                return UsernameStatus.FREE
+    except Exception:
+        return UsernameStatus.FREE
+
+async def is_username_free(client: Client, username: str) -> Tuple[bool, UsernameStatus]:
+    mtproto_free = await check_mtproto_username(client, username)
+    if not mtproto_free:
+        return False, UsernameStatus.TAKEN
+    
+    fragment_status = await check_fragment_username(username)
+    if fragment_status == UsernameStatus.AUCTION:
+        return False, UsernameStatus.AUCTION
+    
+    return True, UsernameStatus.FREE
+
+# ========== ГЕНЕРАЦИЯ USERNAME ==========
+
+def generate_random_username(length: int) -> str:
+    letters = 'abcdefghijklmnopqrstuvwxyz'
+    return ''.join(random.choice(letters) for _ in range(length))
+
+def generate_cvcvc_username(length: int) -> str:
+    if length == 5:
+        return (random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)))
+    elif length == 6:
+        return (random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)))
+    elif length == 7:
+        return (random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) + 
+                random.choice(list(CONSONANTS)) + random.choice(list(VOWELS)) +
+                random.choice(list(CONSONANTS)))
+    return generate_random_username(length)
+
+def generate_word_based_username(length: int) -> str:
+    possible_words = [w for w in POPULAR_WORDS if len(w) <= length]
+    if not possible_words:
+        return generate_random_username(length)
+    
+    word = random.choice(possible_words)
+    if len(word) == length:
+        return word
+    elif len(word) < length:
+        extra = length - len(word)
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        return word + ''.join(random.choice(letters) for _ in range(extra))
+    else:
+        return word[:length]
+
+async def find_beautiful_usernames(
+    client: Client, 
+    length: int, 
+    limit: int = 10,
+    exclude: List[str] = None
+) -> List[Tuple[str, int, str]]:
+    if exclude is None:
+        exclude = []
+    
     found = []
     attempts = 0
-    # Пока не нашли 10 свободных и не превысили лимит попыток
-    while len(found) < 10 and attempts < 40:
-        candidates = generate_pretty_usernames(length, count=30)
-        for username in candidates:
-            if username in shown_set:
-                continue
-            if await is_username_free(username):
-                found.append(username)
-                shown_set.add(username)
-                if len(found) >= 10:
-                    break
+    max_attempts = 500
+    
+    while len(found) < limit and attempts < max_attempts:
         attempts += 1
+        
+        strategy = random.choice(['random', 'cvcvc', 'word'])
+        if strategy == 'cvcvc':
+            username = generate_cvcvc_username(length)
+        elif strategy == 'word':
+            username = generate_word_based_username(length)
+        else:
+            username = generate_random_username(length)
+        
+        if username in exclude or any(u[0] == username for u in found):
+            continue
+        
+        score, reasons = calculate_beauty_score(username)
+        
+        if score >= 70:
+            is_free, status = await is_username_free(client, username)
+            if is_free:
+                reason_str = ", ".join(reasons[:2])
+                found.append((username, score, reason_str))
+                print(f"Found: @{username} (score: {score})")
     
-    await wait_msg.delete()
-    
-    if not found:
-        await message.answer(f"❌ Свободные красивые username для длины {length} закончились. Попробуй другую длину")
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="5", callback_data="length_5"),
-             InlineKeyboardButton(text="6", callback_data="length_6"),
-             InlineKeyboardButton(text="7", callback_data="length_7")]
-        ])
-        await message.answer("Выбери другую длину:", reply_markup=keyboard)
-        return
-    
-    response = ["✅ Нашёл для тебя:"]
-    for i, u in enumerate(found, 1):
-        # Простая оценка красоты (длина, наличие гласных и т.п.)
-        score = random.randint(70, 100)  # заглушка, можно заменить реальной логикой
-        response.append(f"{i}. @{u} (рейтинг красоты: {score}/100)")
-    text = "\n".join(response)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Найти ещё", callback_data=f"next_{length}")]
-    ])
-    await message.answer(text, reply_markup=keyboard)
+    found.sort(key=lambda x: x[1], reverse=True)
+    return found[:limit]
 
-# --- Запуск бота ---
+# ========== КЛАВИАТУРЫ ==========
+
+def get_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔍 Искать username", callback_data="search"),
+            InlineKeyboardButton("👤 Кто создатель?", callback_data="creator")
+        ]
+    ])
+
+def get_length_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("5", callback_data="length_5"),
+            InlineKeyboardButton("6", callback_data="length_6"),
+            InlineKeyboardButton("7", callback_data="length_7")
+        ]
+    ])
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]
+    ])
+
+def get_find_more_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Найти ещё", callback_data="find_more")]
+    ])
+
+# ========== ОСНОВНОЙ КОД БОТА ==========
+
+# Создаем клиент для бота
+app = Client(
+    "username_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
+# Создаем клиент для пользователя (для проверки username)
+user_client = Client(
+    "user_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    phone_number=PHONE_NUMBER
+)
+
+@app.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    await message.reply(
+        "Добро пожаловать в Username Clouds☁, тут вы можете найти красивые username",
+        reply_markup=get_main_keyboard()
+    )
+
+@app.on_callback_query()
+async def handle_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
+    
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "current_length": None,
+            "found_usernames": []
+        }
+    
+    if data == "creator":
+        await callback_query.message.edit_text(
+            "Мой создатель - t.me/savesep",
+            reply_markup=get_back_keyboard()
+        )
+    
+    elif data == "back_to_main":
+        await callback_query.message.edit_text(
+            "Добро пожаловать в Username Clouds☁, тут вы можете найти красивые username",
+            reply_markup=get_main_keyboard()
+        )
+    
+    elif data == "search":
+        await callback_query.message.edit_text(
+            "Выбери длину username для поиска:",
+            reply_markup=get_length_keyboard()
+        )
+    
+    elif data.startswith("length_"):
+        length = int(data.split("_")[1])
+        user_sessions[user_id]["current_length"] = length
+        user_sessions[user_id]["found_usernames"] = []
+        
+        await callback_query.message.edit_text(
+            f"🔎 Ищу красивые свободные username из {length} букв... Это может занять несколько секунд",
+            reply_markup=None
+        )
+        
+        found = await find_beautiful_usernames(
+            user_client, 
+            length, 
+            limit=10,
+            exclude=[]
+        )
+        
+        if found:
+            user_sessions[user_id]["found_usernames"] = [u[0] for u in found]
+            
+            result_text = "✅ Нашёл для тебя:\n"
+            for i, (username, score, reason) in enumerate(found, 1):
+                result_text += f"{i}. @{username} (рейтинг красоты: {score}/100)\n"
+            
+            await callback_query.message.edit_text(
+                result_text,
+                reply_markup=get_find_more_keyboard()
+            )
+        else:
+            await callback_query.message.edit_text(
+                f"❌ Не удалось найти красивые свободные username для длины {length}. Попробуй другую длину.",
+                reply_markup=get_length_keyboard()
+            )
+    
+    elif data == "find_more":
+        length = user_sessions[user_id].get("current_length")
+        exclude = user_sessions[user_id].get("found_usernames", [])
+        
+        if not length:
+            await callback_query.answer("Пожалуйста, начните поиск заново")
+            return
+        
+        await callback_query.message.edit_text(
+            f"🔎 Ищу ещё красивые свободные username из {length} букв...",
+            reply_markup=None
+        )
+        
+        found = await find_beautiful_usernames(
+            user_client,
+            length,
+            limit=10,
+            exclude=exclude
+        )
+        
+        if found:
+            user_sessions[user_id]["found_usernames"].extend([u[0] for u in found])
+            
+            result_text = "✅ Нашёл для тебя:\n"
+            for i, (username, score, reason) in enumerate(found, 1):
+                result_text += f"{i}. @{username} (рейтинг красоты: {score}/100)\n"
+            
+            await callback_query.message.edit_text(
+                result_text,
+                reply_markup=get_find_more_keyboard()
+            )
+        else:
+            await callback_query.message.edit_text(
+                f"❌ Свободные красивые username для длины {length} закончились. Попробуй другую длину",
+                reply_markup=get_length_keyboard()
+            )
+    
+    await callback_query.answer()
+
 async def main():
-    await dp.start_polling(bot)
+    print("🚀 Запуск user client для проверки username...")
+    await user_client.start()
+    print("✅ User client запущен")
+    
+    print("🚀 Запуск бота...")
+    await app.start()
+    print("✅ Бот запущен! Найди его в Telegram: @UsernameCloudsBot")
+    
+    # Держим бота активным
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
